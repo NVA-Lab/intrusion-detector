@@ -11,8 +11,10 @@ This repository implements a four-stage end-to-end system for detecting and resp
 3. **Real-Time Human Detection & Tracking**  
    - **YOLOv8** for ultra-fast person bounding-box detection  
    - **SAM2 + SAMURAI** for pixel-precise segmentation, centroid extraction, and PTZ camera control
-
-4. **Logging & Anomaly Alerts**  
+4.  **Video Recording & Behavioral Analysis**  
+   - **Automated Recording**: Trigger 5-second video clips when suspicious activity is detected  
+   - **DAM (Dynamic Action Model)**: Generate natural language descriptions of human actions and behaviors from recorded video segments  
+5. **Logging & Anomaly Alerts**  
    Record intrusion events, track “stationary interaction” behaviors, and push logs/alerts to the dashboard or mobile.
 
 By combining wireless sensing, computer vision, and intelligent logging, this pipeline delivers robust, automated intrusion monitoring in real time.  
@@ -85,7 +87,7 @@ This project leverages:
 - **YOLOv8** by Ultralytics for ultra-fast real-time person detection.  
 - **SAM2** by Meta FAIR for pixel-precise segmentation and tracking.  
 - **SAMURAI** by the University of Washington’s Information Processing Lab for motion-aware memory modeling.  
-
+- **DAM (Describe Anything Model)** by NVIDIA for concise natural language descriptions of subject actions or state changes in videos.
 
 ## Citation
 ```
