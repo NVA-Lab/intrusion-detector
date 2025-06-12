@@ -1,7 +1,0 @@
-# Action Log File
-# Format: TIME_RANGE\tDESCRIPTION\tBBOX_INFO
-# Created: 2025-06-12T13:57:24.935640
-
-2025-06-12-135813~135818	A stack of books is neatly arranged, with the top book slightly tilted to the side.	{"bbox_normalized": [0.3, 0.3, 0.7, 0.7], "analysis_mode": "bbox_based", "video_path": "F:\\intrusion-detector\\captures\\video_20250612_135758.mp4", "duration_sec": 5}
-2025-06-12-135829~135834	A white bottle with a label on its side is placed on a flat surface.	{"bbox_normalized": [0.378, 0.293, 0.821, 0.88], "analysis_mode": "bbox_based", "video_path": "F:\\intrusion-detector\\captures\\video_20250612_135813.mp4", "duration_sec": 5}
-2025-06-12-135857~135902	A plush toy is being held by a person wearing a white shirt.	{"bbox_normalized": [0.165, 0.348, 0.857, 0.863], "analysis_mode": "bbox_based", "video_path": "F:\\intrusion-detector\\captures\\video_20250612_135842.mp4", "duration_sec": 5}

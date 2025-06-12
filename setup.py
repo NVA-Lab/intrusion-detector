@@ -179,6 +179,7 @@ setup(
         "requests>=2.32.3",
         "scikit-learn>=1.6.1",
         "scipy>=1.15.3",
+        "keyboard>=0.13.5",
     ],
 
     extras_require={
