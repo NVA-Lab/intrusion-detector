@@ -1,202 +1,247 @@
-import cv2
+#!/usr/bin/env python3
+"""
+Demo Script - API-based Recording System
+모듈화된 구조를 사용한 간소화된 메인 스크립트
+"""
+
+import sys
 import time
-import subprocess
-from datetime import datetime, timedelta
+import warnings
 from pathlib import Path
 from threading import Thread
-from typing import List
-import re
-import warnings
-import sys
+from datetime import datetime
+from typing import List, Dict
+
+# 모듈 import를 위한 경로 추가
+sys.path.append(str(Path(__file__).resolve().parent.parent / "src"))
+
+from camera_manager import CameraManager
+from dam_analyzer import DAMAnalyzer
+from log_manager import LogManager
+from flask import Flask, request, jsonify
+
 # -----------------------------------------------------------------------------
-# Configuration – tweak here if needed
+# Configuration
 # -----------------------------------------------------------------------------
-TEMPERATURE = 0.1
-TOP_P       = 0.15
-DURATION_SEC = 5        # default recording length
-FPS          = 20
+DURATION_SEC = 5
+FPS = 5
+API_HOST = 'localhost'
+API_PORT = 5000
 
-# PROMPT 👉 one‑line action/state only, no appearance/background
-PROMPT = (
-    "Video: <image><image><image><image><image><image><image><image>\n"
-    "Return **one concise English sentence** that describes ONLY the subject's action or state change. "
-    "Do NOT mention appearance, colour, clothing, background, objects, or physical attributes."
-)
-
-# DAM script location — resolve project root one level above this file
-PROJECT_ROOT = Path(__file__).resolve().parent.parent  # .. (repo root)
-DAM_SCRIPT   = PROJECT_ROOT / "src" / "dam_video_with_sam2.py"
-if not DAM_SCRIPT.exists():
-    raise FileNotFoundError(f"DAM script not found at: {DAM_SCRIPT}")
-
-# I/O paths (under project root)
+# 프로젝트 루트 경로
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DAM_SCRIPT = PROJECT_ROOT / "src" / "dam_video_with_sam2.py"
 CAPTURE_DIR = PROJECT_ROOT / "captures"
-CAPTURE_DIR.mkdir(exist_ok=True)
-LOG_FILE    = PROJECT_ROOT / "action_log.txt"
-
+LOG_FILE = PROJECT_ROOT / "action_log.txt"
 
 # -----------------------------------------------------------------------------
-# Helper: run DAM+SAM‑2 and return one‑line description (progress lines filtered)
+# Global Variables & Flask App
 # -----------------------------------------------------------------------------
+recording_active = False
+signal_queue = []
+app = Flask(__name__)
 
-def _extract_description(raw: str) -> str:
-    """Strip tqdm/progress logs & warnings → return the Description line or last clean line."""
-    desc = ""
-    for line in raw.splitlines():
-        if line.startswith("Description:"):
-            desc = line.split("Description:", 1)[1].strip()
-    if desc:
-        return desc
-
-    # fallback – pick the last non‑empty line that is not a progress bar/warning
-    clean_lines = [l for l in raw.splitlines() if l.strip() and not re.search(r"frame loading|propagate in video|Loading checkpoint|UserWarning", l)]
-    return clean_lines[-1].strip() if clean_lines else raw.strip()
-
-
-def describe_video(video_path: Path, box_norm: List[float]) -> str:
-    """Run the DAM+SAM‑2 CLI with fixed prompt → return one‑line description."""
-    cmd = [
-        sys.executable, str(DAM_SCRIPT),
-        "--video_file", str(video_path),
-        "--box", str(box_norm),
-        "--normalized_coords",
-        "--use_box",
-        "--no_stream",
-        "--temperature", str(TEMPERATURE),
-        "--top_p",      str(TOP_P),
-        "--query", PROMPT,
-    ]
-
-    result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    if result.returncode != 0:
-        print("[DAM stderr] ↓↓↓")
-        print(result.stderr)
-        raise RuntimeError(f"DAM exited {result.returncode}")
-
-    return _extract_description(result.stdout or result.stderr)
+# 모듈 인스턴스
+camera_manager = None
+dam_analyzer = None
+log_manager = None
 
 # -----------------------------------------------------------------------------
-# ROI selection on first frame – returns normalised box [x1,y1,x2,y2]
+# External Signal System
 # -----------------------------------------------------------------------------
-
-def select_roi(video_path: Path) -> List[float]:
-    cap = cv2.VideoCapture(str(video_path))
-    ok, frame = cap.read(); cap.release()
-    if not ok:
-        raise RuntimeError("Cannot read first frame.")
-
-    x, y, w, h = cv2.selectROI("Select ROI (Enter/Space = OK, ESC = Cancel)", frame, False, False)
-    cv2.destroyWindow("Select ROI (Enter/Space = OK, ESC = Cancel)")
-
-    if w == 0 or h == 0:  # user cancelled – use full frame
-        return [0.0, 0.0, 1.0, 1.0]
-
-    h_img, w_img = frame.shape[:2]
-    box_norm = [x / w_img, y / h_img, (x + w) / w_img, (y + h) / h_img]
-    return [round(v, 4) for v in box_norm]
+class ExternalSignal:
+    """외부 신호 데이터 구조"""
+    def __init__(self, signal_type: str, bbox_normalized: List[float], metadata: Dict = None):
+        self.signal_type = signal_type
+        self.bbox_normalized = bbox_normalized
+        self.metadata = metadata or {}
+        self.timestamp = datetime.now()
 
 # -----------------------------------------------------------------------------
-# Logging helper – append to action_log.txt in two‑column TSV format
+# Flask API Routes
 # -----------------------------------------------------------------------------
+@app.route('/trigger_recording', methods=['POST'])
+def trigger_recording():
+    """녹화 트리거 API"""
+    try:
+        data = request.get_json()
+        bbox_normalized = data.get('bbox_normalized', [0.25, 0.25, 0.75, 0.75])
+        signal_type = data.get('signal_type', 'api_trigger')
+        metadata = data.get('metadata', {})
+        
+        signal = ExternalSignal(signal_type, bbox_normalized, metadata)
+        signal_queue.append(signal)
+        
+        print(f"[API] 녹화 트리거: {signal_type} with bbox {bbox_normalized}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Recording triggered successfully',
+            'signal_type': signal_type,
+            'bbox_normalized': bbox_normalized
+        }), 200
+        
+    except Exception as e:
+        print(f"[API ERROR] {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 400
 
-def append_log(start_dt: datetime, end_dt: datetime, description: str) -> None:
-    """Append a row: <YYYY‑MM‑DD‑HHMMSS~HHMMSS> \t <description>"""
-    time_range = f"{start_dt.strftime('%Y-%m-%d-%H%M%S')}~{end_dt.strftime('%H%M%S')}"
-    with LOG_FILE.open("a", encoding="utf8") as f:
-        f.write(f"{time_range}\t{description}\n")
+@app.route('/status', methods=['GET'])
+def get_status():
+    """시스템 상태 조회 API"""
+    return jsonify({
+        'status': 'success',
+        'recording_active': recording_active,
+        'signals_in_queue': len(signal_queue),
+        'timestamp': datetime.now().isoformat()
+    }), 200
 
-# -----------------------------------------------------------------------------
-# Record clip → run DAM in background thread, then log result
-# -----------------------------------------------------------------------------
-
-def record_and_describe(cap: cv2.VideoCapture, duration: int = DURATION_SEC, fps: int = FPS):
-    w  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h  = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    start_dt = datetime.now()
-    vid_path = CAPTURE_DIR / f"video_{start_dt.strftime('%Y%m%d_%H%M%S')}.mp4"
-
-    vw = cv2.VideoWriter(str(vid_path),
-                         cv2.VideoWriter_fourcc(*"mp4v"),
-                         fps, (w, h))
-    if not vw.isOpened():
-        warnings.warn("VideoWriter failed to open – check codec/FourCC")
-        return
-
-    t0 = time.time()
-    while time.time() - t0 < duration:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        vw.write(frame)
-
-    vw.release()
-    print(f"[INFO] recording saved: {vid_path}")
-    end_dt = start_dt + timedelta(seconds=duration)
-
-    # run ROI selection + DAM asynchronously
-    def _run():
-        try:
-            box_norm = select_roi(vid_path)
-            desc     = describe_video(vid_path, box_norm)
-            print(f"[DAM] {desc}")
-            append_log(start_dt, end_dt, desc)
-        except Exception as e:
-            print("[ERR] DAM inference failed:", e)
-
-    Thread(target=_run, daemon=True).start()
+def run_flask_api():
+    """Flask API 서버 실행"""
+    print(f"[API] API 서버 시작: {API_HOST}:{API_PORT}")
+    app.run(host=API_HOST, port=API_PORT, debug=False, use_reloader=False)
 
 # -----------------------------------------------------------------------------
-# Main camera loop – press 's' to record, 'q' to quit
+# Signal Processing
 # -----------------------------------------------------------------------------
-
-def main():
-    # 카메라 1 사용 (더 안정적)
-    cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    if not cap.isOpened():
-        print("카메라 1을 열 수 없습니다. 카메라 0을 시도합니다...")
-        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        if not cap.isOpened():
-            print("카메라를 열 수 없습니다.")
-            return
+def process_external_signals():
+    """외부 신호 처리"""
+    global recording_active
     
-    # 카메라 설정 최적화
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-    cap.set(cv2.CAP_PROP_FPS, 30)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # 버퍼 크기 줄여서 지연 감소
-    
-    print("s: record 5 seconds | q: quit")
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("프레임을 읽을 수 없습니다.")
-            break
-
-        cv2.imshow("Camera", frame)
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord('s'):
-            print("[INFO] recording 5 seconds …")
-            Thread(target=record_and_describe, args=(cap,), daemon=True).start()
-
-        elif key == ord('q'):
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
+        if signal_queue and not recording_active:
+            signal = signal_queue.pop(0)
+            
+            print(f"[TRIGGER] 신호 처리: {signal.signal_type}")
+            print(f"[TRIGGER] BBox: {signal.bbox_normalized}")
+            
+            def record_and_analyze():
+                global recording_active
+                recording_active = True
+                try:
+                    # 녹화
+                    video_path = camera_manager.record_video(DURATION_SEC, FPS)
+                    if video_path:
+                        # DAM 분석
+                        description = dam_analyzer.analyze_video(video_path, signal.bbox_normalized, use_sam2=False)
+                        if description:
+                            # 로그 저장
+                            log_manager.log_analysis_result(
+                                video_path, signal.bbox_normalized, description, "bbox_based", DURATION_SEC
+                            )
+                            print(f"[완료] 분석 결과: {description}")
+                        
+                except Exception as e:
+                    print(f"[오류] 녹화/분석 실패: {e}")
+                finally:
+                    recording_active = False
+            
+            Thread(target=record_and_analyze, daemon=True).start()
+        
+        time.sleep(0.1)
 
 # -----------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    # 환경 체크 (선택) - 경고 메시지 숨김
+# Main Function
+# -----------------------------------------------------------------------------
+def main():
+    global camera_manager, dam_analyzer, log_manager, recording_active
+    
+    # 환경 체크
     try:
         import sam2, torch
-        # if not hasattr(sam2, "_C"):
-        #     warnings.warn("⚠ SAM2 C-extension not found – using Dummy predictor (quality↓)")
-
         if not torch.cuda.is_available():
-            warnings.warn("⚠ CUDA not available – inference will run on CPU (slow)")
+            warnings.warn("CUDA not available – inference will run on CPU (slow)")
     except ImportError:
         warnings.warn("sam2 or torch not importable – please check installation")
+    
+    # 모듈 초기화
+    print(" 모듈 초기화 중...")
+    try:
+        camera_manager = CameraManager(CAPTURE_DIR, width=1280, height=720, fps=10)
+        dam_analyzer = DAMAnalyzer(DAM_SCRIPT, temperature=0.1, top_p=0.15)
+        log_manager = LogManager(LOG_FILE)
+        print("모듈 초기화 완료")
+    except Exception as e:
+        print(f"모듈 초기화 실패: {e}")
+        return
+    
+    # 카메라 초기화
+    if not camera_manager.initialize_camera():
+        print(" 카메라 초기화 실패")
+        return
+    
+    print("=== API 기반 녹화 시스템 ===")
+    print("외부 API 신호 대기 중...")
+    print(f"API 서버: http://{API_HOST}:{API_PORT}")
+    print("명령어:")
+    print("  'q' - 종료")
+    print("외부 스크립트로 API 요청을 보내세요")
+    
+    # 백그라운드 스레드 시작
+    Thread(target=run_flask_api, daemon=True).start()
+    Thread(target=process_external_signals, daemon=True).start()
+    
+    # API 서버 시작 대기
+    time.sleep(2)
+    
+    # 메인 루프
+    try:
+        while True:
+            ret, frame = camera_manager.read_frame()
+            if not ret:
+                print("프레임을 읽을 수 없습니다.")
+                break
+            
+            # 상태 오버레이 추가
+            frame = camera_manager.add_status_overlay(frame, recording_active, len(signal_queue))
+            
+            # 화면 표시
+            import cv2
+            cv2.imshow("API-based Recording System", frame)
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord('q'):
+                break
+    
+    except KeyboardInterrupt:
+        print("\n사용자에 의해 중단됨")
+    
+    finally:
+        # 리소스 정리
+        camera_manager.release()
+        print(" 시스템 종료")
 
+# -----------------------------------------------------------------------------
+# External API Functions (for integration)
+# -----------------------------------------------------------------------------
+def send_external_signal(bbox_normalized: List[float], signal_type: str = "intrusion_detected", metadata: Dict = None):
+    """외부 API 함수 - 신호 전송"""
+    signal = ExternalSignal(signal_type, bbox_normalized, metadata)
+    signal_queue.append(signal)
+    print(f"[API] 신호 전송: {signal_type} with bbox {bbox_normalized}")
+
+def analyze_video_with_external_bbox(video_path: str, bbox_normalized: List[float], use_sam2: bool = False) -> str:
+    """외부 API 함수 - 비디오 분석"""
+    try:
+        video_path = Path(video_path)
+        if not video_path.exists():
+            raise FileNotFoundError(f"Video file not found: {video_path}")
+        
+        # DAM 분석기가 없으면 임시 생성
+        if dam_analyzer is None:
+            temp_analyzer = DAMAnalyzer(DAM_SCRIPT)
+            description = temp_analyzer.analyze_video(video_path, bbox_normalized, use_sam2)
+        else:
+            description = dam_analyzer.analyze_video(video_path, bbox_normalized, use_sam2)
+        
+        # 로그 저장
+        if log_manager and description:
+            log_manager.log_analysis_result(video_path, bbox_normalized, description, 
+                                          "sam2_segmentation" if use_sam2 else "bbox_based")
+        
+        return description
+    except Exception as e:
+        print(f"외부 분석 실패: {e}")
+        raise
+
+if __name__ == "__main__":
     main()

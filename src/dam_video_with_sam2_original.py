@@ -52,42 +52,9 @@ def extract_frames_from_video(video_path):
     
     return frame_paths, temp_dir
 
-def apply_sam2(image_files, points=None, box=None, normalized_coords=False, use_sam2=False):
-    """Apply SAM2 to video frames using points or box on first frame
-    
-    Args:
-        use_sam2: If True, use SAM2 processing. If False (default), create rectangular masks from bbox
-    """
-    
-    if not use_sam2 and box is not None:
-        # Default behavior: Skip SAM2 processing - create simple rectangular masks from bbox
-        first_frame = cv2.imread(image_files[0])
-        height, width = first_frame.shape[:2]
-        
-        if normalized_coords:
-            x1, y1, x2, y2 = box
-            x1 = int(x1 * width)
-            y1 = int(y1 * height) 
-            x2 = int(x2 * width)
-            y2 = int(y2 * height)
-        else:
-            x1, y1, x2, y2 = map(int, box)
-        
-        # Create rectangular mask for all frames
-        masks = []
-        for img_file in image_files:
-            mask = np.zeros((height, width), dtype=bool)
-            mask[y1:y2, x1:x2] = True
-            masks.append(mask)
-        
-        print(f"Using bbox-based masks (default mode): [{x1},{y1},{x2},{y2}]")
-        return masks
-    elif not use_sam2:
-        raise ValueError("Default mode requires box coordinates")
+def apply_sam2(image_files, points=None, box=None, normalized_coords=False):
+    """Apply SAM2 to video frames using points or box on first frame"""
 
-    # SAM2 processing (only when explicitly requested)
-    print("Using SAM2 segmentation processing...")
-    
     # If coordinates are normalized, convert them to absolute coordinates
     if normalized_coords:
         # Read first frame to get dimensions
@@ -206,8 +173,6 @@ if __name__ == '__main__':
     parser.add_argument('--use_box', action='store_true', help='Use bounding boxes instead of points')
     parser.add_argument('--output_image_dir', type=str, default=None, 
                        help='Directory to save the output images with contours')
-    parser.add_argument('--use_sam2', action='store_true', 
-                       help='Use SAM2 segmentation processing (default: use bbox-based rectangular masks)')
 
     args = parser.parse_args()
     
@@ -216,16 +181,9 @@ if __name__ == '__main__':
         torch.backends.cudnn.allow_tf32 = True
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    # Only initialize SAM2 if explicitly requested
-    if args.use_sam2:
-        sam2_checkpoint = "checkpoints/sam2.1_hiera_large.pt"
-        model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
-        predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
-        print("SAM2 model loaded")
-    else:
-        predictor = None
-        print("Using bbox-based masks (default mode)")
+    sam2_checkpoint = "checkpoints/sam2.1_hiera_large.pt"
+    model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+    predictor = build_sam2_video_predictor(model_cfg, sam2_checkpoint, device=device)
 
     # Get list of image files and sort them
     if args.video_file:
@@ -242,10 +200,8 @@ if __name__ == '__main__':
     points = ast.literal_eval(args.points) if args.points else None
     box = ast.literal_eval(args.box) if args.box else None
 
-    # Process video (default: bbox-based masks, optional: SAM2)
-    masks = apply_sam2(image_files, points=points, box=box, 
-                      normalized_coords=args.normalized_coords,
-                      use_sam2=args.use_sam2)
+    # Process video with SAM2
+    masks = apply_sam2(image_files, points=points, box=box, normalized_coords=args.normalized_coords)
     
     # Select masks for the 8 frames we want
     selected_masks = [masks[i] for i in indices]
