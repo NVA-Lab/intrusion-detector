@@ -45,6 +45,84 @@ class DescribeAnythingModel(nn.Module):
         image_processor = self.model.vision_tower.image_processor
         self.model.config.image_processor = image_processor
 
+    def forward(self, images, masks):
+        """ONNX 변환을 위한 forward 메서드"""
+        # 입력 형식 확인
+        if not isinstance(images, torch.Tensor) or not isinstance(masks, torch.Tensor):
+            raise ValueError(f"Expected tensor inputs, got {type(images)} and {type(masks)}")
+        
+        # 입력 크기 확인
+        if images.dim() != 5 or masks.dim() != 5:  # [batch_size, sequence_length, channels, height, width]
+            raise ValueError(f"Expected 5D tensor inputs, got shapes {images.shape} and {masks.shape}")
+        
+        # 배치 크기와 시퀀스 길이 추출
+        batch_size = images.size(0)
+        sequence_length = images.size(1)
+        height = images.size(3)
+        width = images.size(4)
+        
+        # 이미지와 마스크를 모델 입력 형식으로 변환
+        images_reshaped = images.reshape(batch_size * sequence_length, 3, height, width)
+        masks_reshaped = masks.reshape(batch_size * sequence_length, 1, height, width)
+        
+        # DAM 모델이 context provider를 사용하는 경우 8채널을 기대함
+        # full image (4채널: RGB + 마스크) + crop image (4채널: RGB + 마스크)
+        full_images = torch.cat([images_reshaped, masks_reshaped], dim=1)  # 4채널
+        crop_images = full_images.clone()  # 동일한 이미지를 crop으로 사용 (단순화)
+        
+        # 8채널로 결합 (full + crop)
+        combined_images = torch.cat([full_images, crop_images], dim=1)  # 8채널
+        
+        # 기본 프롬프트 토큰화
+        query = "Video: <image><image><image><image><image><image><image><image>\nReturn **one concise English sentence** that describes ONLY the subject's action or state change."
+        
+        # 토큰화
+        from .model.constants import IMAGE_TOKEN_INDEX
+        from .model.mm_utils import tokenizer_image_token
+        
+        input_ids = tokenizer_image_token(query, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+        input_ids = input_ids.unsqueeze(0).to(images.device)
+        
+        # 어텐션 마스크 생성
+        attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+        
+        # 모델 추론
+        with torch.inference_mode():
+            # prepare_inputs_labels_for_multimodal 호출
+            (
+                _,
+                position_ids,
+                attention_mask,
+                past_key_values,
+                inputs_embeds,
+                labels,
+            ) = self.model.prepare_inputs_labels_for_multimodal(
+                input_ids, None, attention_mask, None, None, combined_images
+            )
+            
+            # inputs_embeds가 None인지 확인
+            if inputs_embeds is None:
+                # 직접 임베딩 생성
+                inputs_embeds = self.model.get_input_embeddings()(input_ids)
+            
+            # 타입 변환
+            inputs_embeds = inputs_embeds.to(self.model.dtype)
+            
+            # LLM 생성
+            outputs = self.model.llm.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                do_sample=False,
+                num_beams=1,
+                max_new_tokens=512,
+                pad_token_id=self.tokenizer.pad_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
+        
+        # 결과 디코딩
+        descriptions = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        return descriptions
+
     def get_prompt(self, qs):
         if DEFAULT_IMAGE_TOKEN not in qs:
             raise ValueError("no <image> tag found in input.")

@@ -186,6 +186,12 @@ setup(
         "dev": [
             "black",
             "ruff",
+        ],
+        "tensorrt": [
+            "tensorrt>=8.6.0",
+            "pycuda>=2024.1",
+            "onnx>=1.15.0",
+            "onnxruntime-gpu>=1.16.0",
         ]
     },
 )
