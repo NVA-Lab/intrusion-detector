@@ -188,5 +188,11 @@ ENV/
 *.h5
 checkpoints/*.pt
 
+# TensorRT cache and engine files
+tensorrt_cache/
+*.trt
+*.engine
+tensorrt_setup_info.json
+
 # Keep empty directories
 !**/.gitkeep
