@@ -106,12 +106,14 @@ def on_t_key_pressed():
     get_system_status()
 
 def test_connection():
-    """연결 테스트"""
+    """연결 테스트 - 상태 확인만 수행 (녹화 신호 없음)"""
     print("🔗 demo.py API 서버와의 연결을 테스트합니다...")
-    if send_recording_signal([0.3, 0.3, 0.7, 0.7], "connection_test", {"test": True}):
+    if get_system_status():
         print("✅ 연결 성공!")
+        return True
     else:
         print("❌ 연결 실패!")
+        return False
 
 def main():
     """메인 함수"""
